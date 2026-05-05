@@ -1,0 +1,22 @@
+# Security: Do not upload API keys
+.env
+
+# Data: Do not upload large database files or datasets
+*.db
+*.duckdb
+*.csv
+*.json
+/datasets/
+# If your DuckDB file is named specifically:
+threat_intelligence.duckdb
+
+# Environments: Do not upload your virtual environment
+.venv/
+env/
+venv/
+__pycache__/
+.pytest_cache/
+
+# OS specific files
+.DS_Store
+Thumbs.db
