@@ -9,10 +9,11 @@ import os
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_ollama import ChatOllama
 
 load_dotenv()
 
-from agent import build_agent, query, DB_PATH
+from agent import build_agent, query, DB_PATH, current_llm_source
 
 # ── Globals ───────────────────────────────────────────────────────────────────
 
@@ -83,6 +84,30 @@ def parse_table_from_markdown(markdown: str):
         return None
 
 
+def get_chart_llm():
+    """Create a fallback LLM for chart generation (Gemini -> Ollama)."""
+    class ChartFallbackLLM:
+        def __init__(self):
+            self.gemini = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
+            self.ollama = ChatOllama(
+                model=os.getenv("OLLAMA_MODEL", "mistral"),
+                base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+                temperature=0,
+            )
+
+        def invoke(self, input_data):
+            try:
+                return self.gemini.invoke(input_data)
+            except Exception as e:
+                print(f"⚠️  Gemini chart failed: {str(e)[:100]}. Falling back to Ollama...")
+                try:
+                    return self.ollama.invoke(input_data)
+                except Exception as e2:
+                    print(f"❌ Ollama chart also failed: {str(e2)}")
+                    raise
+    return ChartFallbackLLM()
+
+
 def get_dynamic_chart(question: str, agent_answer: str):
     table_match = re.search(
         r"(\|.+\|[\s\S]+?\|[-| :]+\|[\s\S]+?)(?:\n\n|\Z)", agent_answer
@@ -95,7 +120,7 @@ def get_dynamic_chart(question: str, agent_answer: str):
     if df is None or df.empty:
         return None
 
-    chart_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
+    chart_llm = get_chart_llm()
     user_msg  = f"Question: {question}\n\nResults table:\n{table_str}"
 
     response = chart_llm.invoke([
@@ -203,6 +228,11 @@ def respond(question: str, history: list):
         return history, None
 
     answer = query(agent_executor, question, chat_history)
+    
+    # Add LLM source indicator
+    from agent import current_llm_source
+    llm_badge = "� Ollama (Local)" if current_llm_source == "ollama" else "🔵 Gemini (API)"
+    answer_with_badge = f"{answer}\n\n---\n*Processing with: {llm_badge}*"
 
     chat_history.append(HumanMessage(content=question))
     chat_history.append(AIMessage(content=answer))
@@ -210,7 +240,7 @@ def respond(question: str, history: list):
     history = history or []
     
     history.append({"role": "user",      "content": question})
-    history.append({"role": "assistant", "content": answer})
+    history.append({"role": "assistant", "content": answer_with_badge})
 
     chart = get_dynamic_chart(question, answer)
     return history, chart

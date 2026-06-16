@@ -1,12 +1,17 @@
 # agent.py
 import duckdb
+import os
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_ollama import ChatOllama
 from dotenv import load_dotenv
 load_dotenv()
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage
 from langgraph.prebuilt import create_react_agent
 from schema import get_schema_context, DB_PATH
+
+# Track which LLM is currently being used
+current_llm_source = "gemini"  # "gemini" or "ollama"
 
 
 # ── SQL tool ──────────────────────────────────────────────────────────────────
@@ -30,6 +35,60 @@ def execute_sql(query: str) -> str:
 
     except Exception as e:
         return f"SQL error: {str(e)}. Rewrite the query and try again."
+
+
+# ── LLM Fallback Wrapper ──────────────────────────────────────────────────────
+
+class FallbackLLM:
+    """Wrapper that tries Ollama first (local), falls back to Gemini (API) on error."""
+
+    def __init__(self):
+        self.ollama = ChatOllama(
+            model=os.getenv("OLLAMA_MODEL", "mistral"),
+            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            temperature=0,
+        )
+        self.gemini = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
+        self.current_source = "ollama"
+        self._current_model = self.ollama
+        self._fallback_triggered = False
+
+    def invoke(self, input_data):
+        """Try Ollama first (local), fall back to Gemini (API) on error."""
+        global current_llm_source
+        
+        # Try Ollama first (local, fast)
+        if not self._fallback_triggered:
+            try:
+                result = self.ollama.invoke(input_data)
+                self.current_source = "ollama"
+                self._current_model = self.ollama
+                current_llm_source = "ollama"
+                return result
+            except Exception as e:
+                print(f"\n⚠️  Ollama failed: {str(e)[:150]}")
+                print("   Falling back to Gemini API...\n")
+                self._fallback_triggered = True
+        
+        # Use Gemini (fallback)
+        try:
+            result = self.gemini.invoke(input_data)
+            self.current_source = "gemini"
+            self._current_model = self.gemini
+            current_llm_source = "gemini"
+            print("✓ Processing with Gemini API (fallback)\n")
+            return result
+        except Exception as e:
+            print(f"❌ Both Ollama and Gemini failed. Gemini error: {str(e)}")
+            raise Exception(f"Both Ollama and Gemini failed. Last error: {str(e)}")
+
+    def batch(self, input_list):
+        """Batch invoke with fallback."""
+        return [self.invoke(inp) for inp in input_list]
+
+    def __getattr__(self, name):
+        """Delegate unknown attributes to the current model."""
+        return getattr(self._current_model, name)
 
 
 # ── Agent builder ─────────────────────────────────────────────────────────────
@@ -62,7 +121,7 @@ INSTRUCTIONS:
 - Never fabricate threat data - only report what the tool returns
 """
 
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
+    llm = FallbackLLM()
     tools = [execute_sql]
 
     # create_react_agent is the LangGraph replacement for AgentExecutor +
